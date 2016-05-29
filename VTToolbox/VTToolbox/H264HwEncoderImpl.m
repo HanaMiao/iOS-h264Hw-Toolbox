@@ -5,6 +5,7 @@
 //  Created by Ganvir, Manish on 3/31/15.
 //  Copyright (c) 2015 Ganvir, Manish. All rights reserved.
 //
+//ref: https://github.com/jgh-/VideoCore/blob/master/transforms/Apple/H264Encode.mm
 
 #import "H264HwEncoderImpl.h"
 #define YUV_FRAME_SIZE 2000
@@ -23,7 +24,7 @@
     CMFormatDescriptionRef  format;
     CMSampleTimingInfo * timingInfo;
     BOOL initialized;
-    int  frameCount;
+    int  inputFrameCount;
     NSData *sps;
     NSData *pps;
 }
@@ -45,16 +46,15 @@
     EncodingSession = nil;
     initialized = true;
     aQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-    frameCount = 0;
+    inputFrameCount = 0;
     sps = NULL;
     pps = NULL;
     
 }
 
-void didCompressH264(void *outputCallbackRefCon, void *sourceFrameRefCon, OSStatus status, VTEncodeInfoFlags infoFlags,
-CMSampleBufferRef sampleBuffer )
+void didCompressH264(void *outputCallbackRefCon, void *sourceFrameRefCon, OSStatus status, VTEncodeInfoFlags infoFlags, CMSampleBufferRef sampleBuffer )
 {
-    NSLog(@"didCompressH264 called with status %d infoFlags %d", (int)status, (int)infoFlags);
+    //NSLog(@"didCompressH264 called with status %d infoFlags %d", (int)status, (int)infoFlags);
     if (status != 0) return;
     
     if (!CMSampleBufferDataIsReady(sampleBuffer))
@@ -63,7 +63,9 @@ CMSampleBufferRef sampleBuffer )
         return;
     }
    H264HwEncoderImpl* encoder = (__bridge H264HwEncoderImpl*)outputCallbackRefCon;
-   
+   [encoder->_delegate gotCompressedSampleBuffer:sampleBuffer];
+    return;
+    
    // Check if we have got a key frame first
     bool keyframe = !CFDictionaryContainsKey( (CFArrayGetValueAtIndex(CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, true), 0)), kCMSampleAttachmentKey_NotSync);
     
@@ -186,7 +188,7 @@ CMSampleBufferRef sampleBuffer )
              if (actualBytes < frameSize)
                   [theData setLength:actualBytes];
             
-            frameCount++;
+            inputFrameCount++;
             // Create a CM Block buffer out of this data
             CMBlockBufferRef BlockBuffer = NULL;
             OSStatus status = CMBlockBufferCreateWithMemoryBlock(NULL, buffer, actualBytes,kCFAllocatorNull, NULL, 0, actualBytes, kCMBlockBufferAlwaysCopyDataFlag, &BlockBuffer);
@@ -226,7 +228,7 @@ CMSampleBufferRef sampleBuffer )
             CVImageBufferRef imageBuffer = (CVImageBufferRef)CMSampleBufferGetImageBuffer(sampleBuffer);
             
             // Create properties
-            CMTime presentationTimeStamp = CMTimeMake(frameCount, 300);
+            CMTime presentationTimeStamp = CMTimeMake(inputFrameCount, 300);
             //CMTime duration = CMTimeMake(1, DURATION);
             VTEncodeInfoFlags flags;
             
@@ -288,7 +290,26 @@ CMSampleBufferRef sampleBuffer )
         // Set the properties
         VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
         VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Main_AutoLevel);
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_AllowTemporalCompression, kCFBooleanFalse);
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
         
+        float quality = 0.5; //not much relate to output file size
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_Quality, CFNumberCreate(NULL, kCFNumberFloatType, &quality));
+        
+        int32_t nominalFrameRate = 24; //larger value leads to less key frame and smaller output file size
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_ExpectedFrameRate, CFNumberCreate(NULL, kCFNumberSInt32Type, &nominalFrameRate));
+        
+        int maxKeyFrameInterval = nominalFrameRate*2;
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_MaxKeyFrameInterval, CFNumberCreate(NULL, kCFNumberIntType, &maxKeyFrameInterval));
+        
+        int32_t bitRate = 600 * 1000; //much relate to output file size
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_AverageBitRate, CFNumberCreate(NULL, kCFNumberSInt32Type, &bitRate));
+        
+        int32_t sourceFrameCount = 255;
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_SourceFrameCount, CFNumberCreate(NULL, kCFNumberSInt32Type, &sourceFrameCount));
+        
+        int32_t expectedDuration = 12288;
+        VTSessionSetProperty(EncodingSession, kVTCompressionPropertyKey_ExpectedDuration, CFNumberCreate(NULL, kCFNumberSInt32Type, &expectedDuration));
         
         // Tell the encoder to start encoding
         VTCompressionSessionPrepareToEncodeFrames(EncodingSession);
@@ -298,20 +319,46 @@ CMSampleBufferRef sampleBuffer )
 {
      dispatch_sync(aQueue, ^{
         
-          frameCount++;
+          inputFrameCount++;
             // Get the CV Image buffer
             CVImageBufferRef imageBuffer = (CVImageBufferRef)CMSampleBufferGetImageBuffer(sampleBuffer);
+         
+            if (false)
+            {
+                // Lock the image buffer
+                CVPixelBufferLockBaseAddress(imageBuffer,0);
+                
+                // Get information of the image
+                uint8_t *baseAddress = (uint8_t *)CVPixelBufferGetBaseAddress(imageBuffer);
+                size_t bytesPerRow = CVPixelBufferGetBytesPerRow(imageBuffer);
+                size_t width = CVPixelBufferGetWidth(imageBuffer);
+                size_t height = CVPixelBufferGetHeight(imageBuffer);
+                NSLog(@"<< image >> width(%zu)  height(%zu) baseAddress(%s)  bytesPerRow(%zu)", width, height, baseAddress, bytesPerRow);
+                //<< image >> width(480)  height(640) baseAddress()  bytesPerRow(724)
+                //
+                //  Here's where you can process the buffer!
+                //  (your code goes here)
+                //
+                //  Finish processing the buffer!
+                //
+                
+                // Unlock the image buffer
+                CVPixelBufferUnlockBaseAddress(imageBuffer,0);
+            }
             
             // Create properties
-            CMTime presentationTimeStamp = CMTimeMake(frameCount, 1000);
-            //CMTime duration = CMTimeMake(1, DURATION);
+         CMTime presentationTimeStamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);//CMTimeMake(inputFrameCount, 1000);
+         NSAssert((CMTimeCompare(presentationTimeStamp, kCMTimeInvalid) != 0), @"presentationTimeStamp error");
+         CMTime duration = CMSampleBufferGetDuration(sampleBuffer);
+         NSLog(@" %d ===>", inputFrameCount);
+            //CMTime duration = CMvaleTimeMake(1, DURATION);
             VTEncodeInfoFlags flags;
             
             // Pass it to the encoder
             OSStatus statusCode = VTCompressionSessionEncodeFrame(EncodingSession,
                                                          imageBuffer,
                                                          presentationTimeStamp,
-                                                         kCMTimeInvalid,
+                                                         duration,
                                                          NULL, NULL, &flags);
             // Check for error
             if (statusCode != noErr) {
@@ -325,7 +372,7 @@ CMSampleBufferRef sampleBuffer )
                 error = NULL;
                 return;
             }
-            NSLog(@"H264: VTCompressionSessionEncodeFrame Success");
+            //NSLog(@"H264: VTCompressionSessionEncodeFrame Success");
        });
     
     

@@ -12,6 +12,7 @@
 
 - (void)gotSpsPps:(NSData*)sps pps:(NSData*)pps;
 - (void)gotEncodedData:(NSData*)data isKeyFrame:(BOOL)isKeyFrame;
+- (void)gotCompressedSampleBuffer:(CMSampleBufferRef) sampleBuffer;
 
 @end
 @interface H264HwEncoderImpl : NSObject 
